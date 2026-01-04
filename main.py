@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import os, json
@@ -11,6 +12,15 @@ import google.generativeai as genai
 load_dotenv()
 
 app = FastAPI(title="AI Fundamental Rights Violation Screener")
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
@@ -218,4 +228,69 @@ def analyze(data: ScenarioInput):
     return {
         #"matched_articles": matched_articles,
         "analysis": analysis_text
+    }
+
+@app.post("/screen-scenario")
+def screen_scenario(data: ScenarioInput):
+    """Screen a scenario for FR violations and return structured results"""
+    init_ai()
+    
+    # Search for relevant articles
+    matched_articles = search_relevant_articles(data.scenario, top_k=5)
+    prompt = build_prompt(data.scenario, matched_articles)
+    
+    try:
+        response = gemini.generate_content(prompt)
+        analysis_text = getattr(response, "text", str(response))
+        analysis_text = normalize_analysis_text(analysis_text)
+    except Exception as e:
+        print("Generative API error:", e)
+        raise HTTPException(status_code=500, detail=str(e))
+    
+    # Parse the response into structured format
+    violations = []
+    has_violation = "Violation Status:" in analysis_text and "Yes" in analysis_text.split("Violation Status:")[1].split("\n")[0]
+    
+    if has_violation:
+        # Extract violated articles
+        articles_section = ""
+        if "Violated Article(s):" in analysis_text:
+            articles_section = analysis_text.split("Violated Article(s):")[1].split("Explanation:")[0].strip()
+        
+        # Extract explanation
+        explanation = ""
+        if "Explanation:" in analysis_text:
+            explanation = analysis_text.split("Explanation:")[1].split("What the person can do next:")[0].strip()
+        
+        # Extract guidance
+        guidance = ""
+        if "What the person can do next:" in analysis_text:
+            guidance = analysis_text.split("What the person can do next:")[1].strip()
+        
+        violations.append({
+            "status": "Violation Detected",
+            "article": articles_section,
+            "explanation": explanation,
+            "guidance": guidance,
+            "confidence": 0.95
+        })
+    else:
+        violations.append({
+            "status": "No Violation",
+            "article": "N/A",
+            "explanation": "No fundamental rights violation detected in this scenario.",
+            "guidance": "No immediate action required.",
+            "confidence": 0.95
+        })
+    
+    return {
+        "violations": violations,
+        "summary": {
+            "total_violations": len([v for v in violations if v["status"] == "Violation Detected"]),
+            "risk_level": "High" if has_violation else "Low",
+            "recommendations": [
+                "Consult with a legal advisor for detailed guidance" if has_violation else "Continue monitoring the situation"
+            ]
+        },
+        "raw_analysis": analysis_text
     }
